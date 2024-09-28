@@ -8,7 +8,6 @@ from sensor_msgs.msg import JointState
 import roboticstoolbox as rtb
 from spatialmath import SE3
 from math import pi
-from scipy.optimize import minimize
 from std_srvs.srv import SetBool
 from geometry_msgs.msg import PoseStamped, Twist
 from tf_transformations import quaternion_from_euler
@@ -29,30 +28,28 @@ class RobotcontrolNode(Node):
         name = "RRR_Robot"
         )
 
-        self.timer = self.create_timer(10, self.mode3_callback)
-
         #publisher
         self.end_effector_pub = self.create_publisher(PoseStamped, "/end_effector", 10)
+        self.target_pub = self.create_publisher(PoseStamped, "/target", 10)
         self.singularity_pub = self.create_publisher(String, "/singularity", 10)
 
         #subscription
-        self.create_subscription(PoseStamped, "/target", self.randomtarget_callback, 10)
         self.create_subscription(Twist, "/cmd_vel", self.cmdvel_callback, 10)
 
         #service server
         self.mode_server = self.create_service(Robot, '/mode', self.mode_callback)
         self.mode2ref_server = self.create_service(Robot, '/mode2', self.mode2_callback)
+        self.mode3_finish = self.create_service(Robot, "/mode3_finish", self.mode3_callback)
 
         #service client
         self.mode3_start = self.create_client(SetBool, "/mode3_start")
-        self.mode3_finish = self.create_client(SetBool, '/mode3_finish')
 
         #variable
         self.mode = 1
         self.target = [0.0,0.0,0.0]
         self.q_target = [0.0, 0.0, 0.0]
-        self.finish = False
-        self.finish2 = True
+        self.finish = False # for check is IK possible
+        self.finish2 = True #for check singularity
         self.mode2_ref = 1 #1 is base 2 is end-effector
         self.v = [0, 0, 0]
 
@@ -65,66 +62,18 @@ class RobotcontrolNode(Node):
         self.name = ["joint_1", "joint_2", "joint_3"]
 
 #=========================================================inverse kinematic===================================================
-    def custom_ikine(self, T_desired, initial_guess):
-        # Define the objective function
-        def objective(q):
-            T_actual = self.robot.fkine(q)
-            # return np.linalg.norm(T_actual.t - T_desired.t)
-            return abs(T_actual.t[0] - T_desired.t[0]) + abs(T_actual.t[1] - T_desired.t[1]) + abs(T_actual.t[2] - T_desired.t[2])
-        
-        # Run the optimization
-        result = minimize(objective, initial_guess, bounds=[(-pi, pi) for _ in initial_guess])
-        
-        return result
-
     def inverse_kinematic(self, target):
         T = SE3(target[0], target[1], target[2])
-        initial_guess = [[pi/2,pi/2,pi/2], [-pi/2,pi/2,pi/2], [pi/2,-pi/2,pi/2], [pi/2,pi/2,-pi/2],
-                         [pi/2,-pi/2,-pi/2], [-pi/2,pi/2,-pi/2], [-pi/2,-pi/2,pi/2], [-pi/2,-pi/2,-pi/2]]
-        q_target = []
-        finish = False
-        for init_guess in initial_guess:
-            q = self.custom_ikine(T, init_guess)
-            if q.fun <= 0.001:
-                q_target.append(q.x[0])
-                q_target.append(q.x[1])
-                q_target.append(q.x[2])
-                finish = True
-                break
-        return (q_target, finish)
+        q_target = self.robot.ik_LM(T, mask = [1,1,1,0,0,0])
+        return (q_target[0], q_target[1])
 
 #============================================================Jacobian=======================================================
     def change_frame(self, q, v):
-        r0_1 = np.array([[np.cos(q[0]), -np.sin(q[0]), 0],
-                         [np.sin(q[0]),  np.cos(q[0]), 0],
-                         [0,             0,            1]])
-        r1_2 = np.array([[np.sin(q[1]),  np.cos(q[1]), 0],
-                         [0,             0,            1],
-                         [np.cos(q[1]), -np.sin(q[1]), 0]])
-        r2_3 = np.array([[np.cos(q[2]), -np.sin(q[2]), 0],
-                         [np.sin(q[2]),  np.cos(q[2]), 0],
-                         [0,             0,            1]])
-        r3_e = np.array([[0, 0, 1],
-                         [1, 0, 0],
-                         [0, 1, 0]])
-        r0_e = r0_1 @ r1_2 @ r2_3 @ r3_e
+        r0_e = self.robot.fkine(q).R
         return r0_e @ np.transpose(v)
 
     def jacobian(self, q, v):
-        x1 = -0.28*((np.sin(q[0])*np.sin(q[1])*np.cos(q[2]))+(np.sin(q[0])*np.cos(q[1])*np.sin(q[2]))) - 0.25*np.sin(q[0])*np.sin(q[1]) + 0.02*np.cos(q[0])
-        x2 = 0.28*((np.cos(q[0])*np.cos(q[1])*np.cos(q[2]))-(np.cos(q[0])*np.sin(q[1])*np.sin(q[2]))) + 0.25*np.cos(q[0])*np.cos(q[1])
-        x3 = 0.28*((np.cos(q[0])*np.cos(q[1])*np.cos(q[2]))-(np.cos(q[0])*np.sin(q[1])*np.sin(q[2])))
-
-        y1 = 0.28*((np.cos(q[0])*np.sin(q[1])*np.cos(q[2]))+(np.cos(q[0])*np.cos(q[1])*np.sin(q[2]))) + 0.25*np.cos(q[0])*np.sin(q[1]) + 0.02*np.sin(q[0])
-        y2 = 0.28*((np.sin(q[0])*np.cos(q[1])*np.cos(q[2]))-(np.sin(q[0])*np.sin(q[1])*np.sin(q[2]))) + 0.25*np.sin(q[0])*np.cos(q[1])
-        y3 = 0.28*((np.sin(q[0])*np.cos(q[1])*np.cos(q[2]))-(np.sin(q[0])*np.sin(q[1])*np.sin(q[2])))
-
-        z1 = 0
-        z2 = -0.28*((np.sin(q[1])*np.cos(q[2]))+(np.cos(q[1])*np.sin(q[2]))) - 0.25*np.sin(q[1])
-        z3 = -0.28*((np.cos(q[1])*np.sin(q[2]))+(np.sin(q[1])*np.cos(q[2])))
-
-        J = np.array([[x1, x2, x3], [y1, y2, y3], [z1, z2, z3]])
-
+        J = self.robot.jacob0(q)[:3]
         if np.linalg.det(J) != 0:
             J_inv= np.linalg.inv(J)
             dq_dt = J_inv @ np.transpose(v)
@@ -154,6 +103,7 @@ class RobotcontrolNode(Node):
                     msg2.data = 'Singularity aleart!!!!'
                     self.singularity_pub.publish(msg2)
                     self.get_logger().info('Singularity aleart!!!!')
+                    self.get_logger().info('Please change mode or reset')
                     self.finish2 = False
                 self.v = [0.0, 0.0, 0.0]
                 q_d = [0.0, 0.0, 0.0]
@@ -189,6 +139,7 @@ class RobotcontrolNode(Node):
             self.target[0] = request.taskspace.x
             self.target[1] = request.taskspace.y
             self.target[2] = request.taskspace.z
+            self.target_publisher()
             ikine_result = self.inverse_kinematic(self.target)
             if ikine_result[1]:
                 response.start = True
@@ -216,7 +167,6 @@ class RobotcontrolNode(Node):
                 msg = SetBool.Request()
                 msg.data = True
                 self.mode3_start.call_async(msg)
-                self.timer.reset()
                 response.start = True
             except:
                 response.start = False
@@ -248,13 +198,17 @@ class RobotcontrolNode(Node):
         return self.jacobian(self.q, self.v)
 
 #=========================================================mode3===================================================
-    def randomtarget_callback(self, msg):
-        task = msg.pose.position
+    def mode3_callback(self, request:Robot.Request, response:Robot.Response):
+        task = request.taskspace
         self.finish = False
         if self.mode == 3:
+            time = (self.get_clock().now().nanoseconds)/10**9
+            time2 = (self.get_clock().now().nanoseconds)/10**9
+            time3 = (self.get_clock().now().nanoseconds)/10**9
             self.target[0] = task.x
             self.target[1] = task.y
             self.target[2] = task.z
+            self.target_publisher()
             ikine_result = self.inverse_kinematic(self.target)
             self.finish = ikine_result[1]
             if self.finish:
@@ -263,16 +217,21 @@ class RobotcontrolNode(Node):
                 self.get_logger().info(f"With q1:{round(self.q_target[0],2)} q2:{round(self.q_target[1],2)} q3:{round(self.q_target[2],2)}")
             else:
                 self.get_logger().info("Cannot find inverse kinematic")
-
-    def mode3_callback(self):
-        msg = SetBool.Request()
-        if abs(self.q_target[0] - self.q[0]) + abs(self.q_target[1] - self.q[1]) + abs(self.q_target[2] - self.q[2]) < 0.005 and self.finish == True:
-            msg.data = True
-            self.mode3_finish.call_async(msg)
-        elif self.mode == 3:
-            self.get_logger().info("Cannot go to point in 10 sec")
-            msg.data = False
-            self.mode3_finish.call_async(msg)
+                self.get_logger().info('Please change mode or reset')
+        if self.finish == True:
+            while (np.linalg.norm(self.q_target - self.q) > 0.005) and (time2 - time < 10):
+                time2 = (self.get_clock().now().nanoseconds)/10**9
+                if time2 - time3 > 0.01:
+                    time3 = time2
+                    self.sim_loop()
+            if np.linalg.norm(self.q_target - self.q) < 0.005:
+                response.start = True
+                return response
+            else:
+                self.get_logger().info("Cannot go to point in 10 sec")
+                self.get_logger().info('Please change mode or reset')
+        response.start = False
+        return response
 
 #=========================================================publish to Rviz===================================================
     def ee_publisher(self):
@@ -289,6 +248,15 @@ class RobotcontrolNode(Node):
         pose.pose.orientation.z = q[2]
         pose.pose.orientation.w = q[3]
         self.end_effector_pub.publish(pose)
+
+    def target_publisher(self):
+        pose = PoseStamped()
+        pose.header.stamp = self.get_clock().now().to_msg()
+        pose.header.frame_id = "link_0"
+        pose.pose.position.x = self.target[0]
+        pose.pose.position.y = self.target[1]
+        pose.pose.position.z = self.target[2]
+        self.target_pub.publish(pose)
 
 
 def main(args=None):

@@ -6,8 +6,8 @@ import roboticstoolbox as rtb
 import numpy as np
 from spatialmath import SE3
 from math import pi
-from geometry_msgs.msg import PoseStamped
 from std_srvs.srv import SetBool
+from robot_interfaces.srv import Robot
 
 class TargetNode(Node):
     def __init__(self):
@@ -22,18 +22,18 @@ class TargetNode(Node):
         name = "RRR_Robot"
         )
 
-        #publisher
-        self.target_pub = self.create_publisher(PoseStamped, "/target", 10)
+        self.create_timer(0.01, self.mode3_callback)
 
         #service server
         self.mode3_start = self.create_service(SetBool, '/mode3_start', self.mode3_start_callback)
-        self.mode3_finish = self.create_service(SetBool, "/mode3_finish", self.mode3_finish_callback)
+        self.mode3_finish = self.create_client(Robot, '/mode3_finish')
 
         #variable
         self.target = [0.0, 0.0, 0.0]
         self.isEnable = False
+        self.future_check = False
 
-    def target_publisher(self):
+    def target_random(self):
         t1 = np.random.uniform(-pi,pi)
         t2 = np.random.uniform(-pi,pi)
         t3 = np.random.uniform(-pi,pi)
@@ -44,35 +44,35 @@ class TargetNode(Node):
         while t3 in [-pi,pi]:
             t3 = np.random.uniform(-pi,pi)
         T = self.robot.fkine([t1,t2,t3])
-        pose = PoseStamped()
-        pose.header.stamp = self.get_clock().now().to_msg()
-        pose.header.frame_id = "link_0"
-        pose.pose.position.x = T.x
-        pose.pose.position.y = T.y
-        pose.pose.position.z = T.z
         self.target[0] = T.x
         self.target[1] = T.y
         self.target[2] = T.z
-        self.target_pub.publish(pose)
 
     def mode3_start_callback(self, request:SetBool.Request, response:SetBool.Response):
         if request.data:
             self.isEnable = True
-            self.target_publisher()
             self.get_logger().info('Start random target')
         elif self.isEnable:
             self.get_logger().info('Stop random target')
             self.isEnable = False
         return response
     
-    def mode3_finish_callback(self, request:SetBool.Request, response:SetBool.Response):
-        if request.data and self.isEnable:
-            self.target_publisher()
-        elif self.isEnable:
-            self.isEnable = False
-            self.get_logger().info('Stop random target')
-        return response
-        
+    def mode3_callback(self):
+        if self.isEnable and self.future_check == False:
+            msg = Robot.Request()
+            self.target_random()
+            msg.taskspace.x = self.target[0]
+            msg.taskspace.y = self.target[1]
+            msg.taskspace.z = self.target[2]
+            self.future = self.mode3_finish.call_async(msg)
+            self.future_check = True
+        if self.future_check:
+            if self.future.result() != None:
+                if self.future.result().start == False:
+                    self.isEnable = False
+                    self.get_logger().info('Stop random target')
+                self.future_check = False
+
 
 def main(args=None):
     rclpy.init(args=args)
