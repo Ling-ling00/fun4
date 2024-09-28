@@ -1,0 +1,8 @@
+int64 mode
+geometry_msgs/Point taskspace
+---
+bool mode
+bool start
+float64 q1
+float64 q2
+float64 q3
