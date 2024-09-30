@@ -68,12 +68,11 @@ class RobotcontrolNode(Node):
         return (q_target[0], q_target[1])
 
 #============================================================Jacobian=======================================================
-    def change_frame(self, q, v):
-        r0_e = self.robot.fkine(q).R
-        return r0_e @ np.transpose(v)
-
-    def jacobian(self, q, v):
-        J = self.robot.jacob0(q)[:3]
+    def jacobian(self,mode, q, v):
+        if mode == 1:
+            J = self.robot.jacob0(q)[:3]
+        elif mode == 2:
+            J = self.robot.jacobe(q)[:3]
         if np.linalg.det(J) != 0:
             J_inv= np.linalg.inv(J)
             dq_dt = J_inv @ np.transpose(v)
@@ -93,7 +92,7 @@ class RobotcontrolNode(Node):
         elif self.mode == 2:
             if abs(self.q[2] - ((self.q[2]//(2*pi))*2*pi)) > 0.1:
                 self.finish2 = True
-                dq_dt = self.calculate_joint_velocity()
+                dq_dt = self.jacobian(self.mode2_ref, self.q, self.v)
                 q_d[0] = dq_dt[0] * self.dt
                 q_d[1] = dq_dt[1] * self.dt
                 q_d[2] = dq_dt[2] * self.dt
@@ -191,11 +190,6 @@ class RobotcontrolNode(Node):
             self.v[0] = msg.linear.x
             self.v[1] = msg.linear.y
             self.v[2] = msg.linear.z
-
-    def calculate_joint_velocity(self):
-        if self.mode2_ref == 2:
-            self.v = self.change_frame(self.q, self.v)
-        return self.jacobian(self.q, self.v)
 
 #=========================================================mode3===================================================
     def mode3_callback(self, request:Robot.Request, response:Robot.Response):
